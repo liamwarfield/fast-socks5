@@ -217,6 +217,66 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Socks5Socket<T> {
         Ok(self)
     }
 
+    // <=========================== Start Of Liams Code ===========================>
+
+    // Follows the SOCKS5 handshake until the client sends the target address
+    pub async fn intercept_upgrade(mut self) -> Result<Socks5Socket<T>> {
+        trace!("upgrading to socks5...");
+
+        // Handshake
+        if self.config.skip_auth == false {
+            let methods = self.get_methods().await?;
+
+            self.can_accept_method(methods).await?;
+
+            if self.config.auth.is_some() {
+                let credentials = self.authenticate().await?;
+                self.auth = AuthenticationMethod::Password {
+                    username: credentials.0,
+                    password: credentials.1,
+                };
+            }
+        } else {
+            debug!("skipping auth");
+        }
+
+        self.read_command().await?;
+        Ok(self)
+    }
+
+    /// finishes the SOCKS5 hand shake, but sends the clients conversation
+    /// the outbound stream passed in.
+    pub async fn continue_upgrade<O>(mut self, outbound: O) -> Result<()>
+    where
+        O: AsyncRead + AsyncWrite + Unpin,
+    {
+        self.inner
+            .write(&[
+                consts::SOCKS5_VERSION,
+                consts::SOCKS5_REPLY_SUCCEEDED,
+                0x00, // reserved
+                1,    // address type (ipv4, v6, domain)
+                127,  // ip
+                0,
+                0,
+                1,
+                0, // port
+                0,
+            ])
+            .await
+            .context("Can't write successful reply")?;
+
+        self.inner.flush().await.context("Can't flush the reply!")?;
+
+        debug!("Wrote success");
+
+        info!("Client handshake completed, forwarding traffic");
+        transfer(&mut self.inner, outbound).await
+    }
+
+    // <=========================== End of Liams code ===========================>
+
+
     /// Read the authentication method provided by the client.
     /// A client send a list of methods that he supports, he could send
     ///
